@@ -41,21 +41,30 @@ if file_var and file_stock:
         if not df_zkit_raw.empty:
             df_zkit_raw.columns = [str(c).strip() for c in df_zkit_raw.columns]
 
-        # Riconoscimento colonne
-        col_art_var = trova_colonna(df_var.columns, ["ARTICOLO", "CODICE", "COD_ART"])
-        col_forn = trova_colonna(df_var.columns, ["FORNITORE", "DESCR_FORN", "RAGIONE SOCIALE"])
+        # Riconoscimento colonne Variazioni
+        col_art_var = trova_colonna(df_var.columns, ["ARTICOLO", "CODICE", "COD_ART", "ART."])
+        col_forn = trova_colonna(df_var.columns, ["FORNITORE", "DESCR_FORN", "RAGIONE SOCIALE", "FORN"])
         col_tipo = trova_colonna(df_var.columns, ["TIPO"])
-        col_data_ini = trova_colonna(df_var.columns, ["DATA INIZIO", "DATA_INIZIO", "VALIDO DAL"])
-        col_p_base = trova_colonna(df_var.columns, ["PREZZO BASE", "PRZ BASE", "PRZ. BASE"])
-        col_p_nuovo = trova_colonna(df_var.columns, ["PREZZO NUOVO", "PRZ NUOVO", "PRZ. NUOVO"])
-        col_c_base = trova_colonna(df_var.columns, ["COSTO BASE", "CST BASE"])
-        col_c_nuovo = trova_colonna(df_var.columns, ["COSTO NUOVO", "CST NUOVO"])
-        col_p_ins = trova_colonna(df_var.columns, ["P_NUOVO_INS", "PREZZO_INS"])
+        col_data_ini = trova_colonna(df_var.columns, ["DATA INIZIO", "DATA_INIZIO", "VALIDO DAL", "INIZIO"])
+        col_p_base = trova_colonna(df_var.columns, ["PREZZO BASE", "PRZ BASE", "PRZ. BASE", "P_BASE"])
+        col_p_nuovo = trova_colonna(df_var.columns, ["PREZZO NUOVO", "PRZ NUOVO", "PRZ. NUOVO", "P_NUOVO"])
+        col_c_base = trova_colonna(df_var.columns, ["COSTO BASE", "CST BASE", "C_BASE"])
+        col_c_nuovo = trova_colonna(df_var.columns, ["COSTO NUOVO", "CST NUOVO", "C_NUOVO"])
+        col_p_ins = trova_colonna(df_var.columns, ["P_NUOVO_INS", "PREZZO_INS", "P_INS"])
 
-        col_art_stock = trova_colonna(df_stock_raw.columns, ["ARTICOLO", "CODICE", "COD_ART"])
-        col_qta_stock = trova_colonna(df_stock_raw.columns, ["GIACENZA", "QTA", "DISPONIBILE", "ESISTENZA"])
+        # Controllo colonna articolo obbligatoria
+        if not col_art_var:
+            st.error(f"Impossibile trovare la colonna articolo nel file Variazioni. Colonne presenti: {list(df_var.columns)}")
+            st.stop()
 
-        col_art_zkit = trova_colonna(df_zkit_raw.columns, ["ARTICOLO", "CODICE", "COD_ART"]) if not df_zkit_raw.empty else None
+        col_art_stock = trova_colonna(df_stock_raw.columns, ["ARTICOLO", "CODICE", "COD_ART", "ART."])
+        col_qta_stock = trova_colonna(df_stock_raw.columns, ["GIACENZA", "QTA", "DISPONIBILE", "ESISTENZA", "QUANTITÀ", "QUANTITA"])
+
+        if not col_art_stock or not col_qta_stock:
+            st.error(f"Verifica il foglio Stock. Colonne presenti: {list(df_stock_raw.columns)}")
+            st.stop()
+
+        col_art_zkit = trova_colonna(df_zkit_raw.columns, ["ARTICOLO", "CODICE", "COD_ART", "ART."]) if not df_zkit_raw.empty else None
         col_mod_zkit = trova_colonna(df_zkit_raw.columns, ["MODULO", "FACING"]) if not df_zkit_raw.empty else None
 
         # Chiave univoca articolo
@@ -63,7 +72,7 @@ if file_var and file_stock:
         df_stock_raw['KEY_ART'] = df_stock_raw[col_art_stock].astype(str).str.strip().str.lstrip("0")
 
         # Giacenza
-        df_stock_raw[col_qta_stock] = pd.to_numeric(df_stock_raw[col_qta_stock], errors='coerce').fillna(0)
+        df_stock_raw[col_qta_stock] = pd.to_numeric(df_stock_raw[col_qta_stock].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
         stock_map = df_stock_raw.groupby('KEY_ART')[col_qta_stock].sum().to_dict()
         df_var['Giacenza'] = df_var['KEY_ART'].map(stock_map).fillna(0)
 
@@ -75,7 +84,7 @@ if file_var and file_stock:
         else:
             df_var['In_Facing'] = False
 
-        # Valori numerici prezzi
+        # Conversione valori prezzo
         if col_p_base:
             df_var['P_BASE_NUM'] = pd.to_numeric(df_var[col_p_base].astype(str).str.replace(',', '.'), errors='coerce')
         else:
@@ -94,9 +103,10 @@ if file_var and file_stock:
         else:
             cond_non_base = False
 
+        # Solo variazione costo (prezzo vendita vuoto o invariato)
         cond_prezzo_invariato = (
             (df_var['P_BASE_NUM'].isna() & df_var['P_NUOVO_NUM'].isna()) |
-            (df_var['P_BASE_NUM'] == df_var['P_NUOVO_NUM'])
+            (df_var['P_BASE_NUM'].notna() & df_var['P_NUOVO_NUM'].notna() & (df_var['P_BASE_NUM'] == df_var['P_NUOVO_NUM']))
         )
 
         df_var['Passaggio_Sicuro'] = cond_zero_stock_facing | cond_non_base | cond_prezzo_invariato
@@ -156,7 +166,7 @@ if file_var and file_stock:
         filtro_urgenti = st.checkbox("Mostra solo articoli URGENTI (<= 3 giorni)")
         df_mostrato = df_operativo[df_operativo['Urgente']] if filtro_urgenti else df_operativo
 
-        colonne_mostra = [c for c in [col_art_var, col_forn, 'Giacenza', 'In_Facing', col_data_ini, 'Giorni_Rimanenti', col_p_base, col_p_nuovo] if c in df_mostrato.columns]
+        colonne_mostra = [c for c in [col_art_var, col_forn, 'Giacenza', 'In_Facing', col_data_ini, 'Giorni_Rimanenti', col_p_base, col_p_nuovo] if c and c in df_mostrato.columns]
         st.dataframe(df_mostrato[colonne_mostra], use_container_width=True)
 
         # DOWNLOAD EXCEL
@@ -173,4 +183,5 @@ if file_var and file_stock:
         )
 
     except Exception as e:
-        st.error(f"Si è verificato un errore durante l'elaborazione: {e}")
+        import traceback
+        st.error(f"Dettaglio errore: {traceback.format_exc()}")
