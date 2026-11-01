@@ -23,6 +23,15 @@ def clean_code(val):
         val_str = val_str[:-2]
     return val_str
 
+def to_num(val):
+    if pd.isna(val):
+        return None
+    val_str = str(val).strip().replace("€", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(val_str)
+    except:
+        return None
+
 if var_file and stock_file:
     with st.spinner("Elaborazione dati in corso..."):
         try:
@@ -32,18 +41,21 @@ if var_file and stock_file:
             # Caricamento file stock/facing (Zkit)
             excel_stock = pd.ExcelFile(stock_file)
             sheet_names = excel_stock.sheet_names
-            
-            # Trova il foglio giusto (Zkit o primo foglio)
             target_sheet = next((s for s in sheet_names if "zkit" in s.lower()), sheet_names[0])
             df_stock = pd.read_excel(stock_file, sheet_name=target_sheet)
 
-            # Normalizzazione colonne
+            # Normalizzazione intestazioni colonne
             df_var.columns = [str(c).strip().upper() for c in df_var.columns]
             df_stock.columns = [str(c).strip().upper() for c in df_stock.columns]
 
-            # Riconoscimento colonne codice articolo
-            col_art_var = next((c for c in df_var.columns if "ART" in c or "COD" in c), df_var.columns[0])
-            col_art_stock = next((c for c in df_stock.columns if "ART" in c or "COD" in c), df_stock.columns[0])
+            # Riconoscimento accurato della colonna Codice Articolo (escludendo Fornitore)
+            col_art_var = next((c for c in df_var.columns if ("ARTICOLO" in c or "COD_ART" in c or "COD.ART" in c or c == "ARTICOLO" or c == "CODICE") and "FORN" not in c), None)
+            if not col_art_var:
+                col_art_var = next((c for c in df_var.columns if "ART" in c and "FORN" not in c), df_var.columns[0])
+
+            col_art_stock = next((c for c in df_stock.columns if ("ARTICOLO" in c or "COD_ART" in c or "COD.ART" in c or c == "ARTICOLO" or c == "CODICE") and "FORN" not in c), None)
+            if not col_art_stock:
+                col_art_stock = next((c for c in df_stock.columns if "ART" in c and "FORN" not in c), df_stock.columns[0])
 
             # Pulizia codici per il merge
             df_var['COD_KEY'] = df_var[col_art_var].apply(clean_code)
@@ -53,7 +65,6 @@ if var_file and stock_file:
             col_giacenza = next((c for c in df_stock.columns if "GIAC" in c or "QTA" in c or "QUANT" in c or "STOCK" in c), None)
             col_facing = next((c for c in df_stock.columns if "FACING" in c or "MODULO" in c), None)
 
-            # Calcolo Giacenza e In_Facing
             stock_summary = pd.DataFrame({'COD_KEY': df_stock['COD_KEY'].unique()})
             
             if col_giacenza:
@@ -71,68 +82,87 @@ if var_file and stock_file:
 
             stock_summary['GIACENZA'] = stock_summary['GIACENZA'].fillna(0)
 
-            # Unione dei due file
+            # Merge
             merged = df_var.merge(stock_summary, on='COD_KEY', how='left')
             merged['GIACENZA'] = merged['GIACENZA'].fillna(0)
             merged['IN_FACING'] = merged['IN_FACING'].fillna('NO')
 
-            # --- IDENTIFICAZIONE PASSAGGIO SICURO ---
-            # 1. Nessuna presenza fisica: Giacenza <= 0 e non in Facing
-            cond_zero_presenza = (merged['GIACENZA'] <= 0) & (merged['IN_FACING'] == 'NO')
-
-            # 2. Variazioni solo costo: PREZZO BASE e PREZZO NUOVO entrambi vuoti o uguali
+            # --- RICONOSCIMENTO COLONNE PREZZI E COSTI ---
             col_prz_base = next((c for c in merged.columns if "PREZZO" in c and "BASE" in c), None)
             col_prz_nuovo = next((c for c in merged.columns if "PREZZO" in c and "NUOVO" in c), None)
+            col_cst_base = next((c for c in merged.columns if "COSTO" in c and "BASE" in c), None)
+            col_cst_nuovo = next((c for c in merged.columns if "COSTO" in c and "NUOVO" in c), None)
 
-            if col_prz_base and col_prz_nuovo:
-                cond_no_variazione_prezzo = (
-                    (merged[col_prz_base].isna() | (merged[col_prz_base].astype(str).str.strip() == "")) &
-                    (merged[col_prz_nuovo].isna() | (merged[col_prz_nuovo].astype(str).str.strip() == ""))
-                ) | (merged[col_prz_base] == merged[col_prz_nuovo])
-            else:
-                cond_no_variazione_prezzo = pd.Series(False, index=merged.index)
+            # Identificazione presenza vendita reale
+            p_base_num = merged[col_prz_base].apply(to_num) if col_prz_base else pd.Series([None]*len(merged))
+            p_nuov_num = merged[col_prz_nuovo].apply(to_num) if col_prz_nuovo else pd.Series([None]*len(merged))
+            c_base_num = merged[col_cst_base].apply(to_num) if col_cst_base else pd.Series([None]*len(merged))
+            c_nuov_num = merged[col_cst_nuovo].apply(to_num) if col_cst_nuovo else pd.Series([None]*len(merged))
 
-            # 3. Tipo variazione non di vendita (se colonna Tipo presente)
+            # Ha una vera variazione di prezzo al pubblico?
+            # Si ha variazione se entrambi o il nuovo sono valorizzati e c'è una differenza effettiva (> 0.001)
+            ha_cambio_prezzo = (p_nuov_num.notna()) & (
+                p_base_num.isna() | ((p_nuov_num - p_base_num).abs() > 0.001)
+            )
+
+            # Ha solo variazione di costo? (prezzi vuoti ma costi presenti con variazione)
+            solo_cambio_costo = (
+                p_nuov_num.isna() & 
+                (c_nuov_num.notna() | c_base_num.notna())
+            )
+
+            # 1. Nessuna presenza fisica a scaffale/magazzino
+            cond_zero_presenza = (merged['GIACENZA'] <= 0) & (merged['IN_FACING'] == 'NO')
+
+            # 2. Nessun cambio al prezzo di vendita (o solo cambio costo)
+            cond_senza_variazione_prezzo = solo_cambio_costo | (~ha_cambio_prezzo)
+
+            # 3. Tipo escluso (se presente e valorizzato)
             col_tipo = next((c for c in merged.columns if "TIPO" in c), None)
             if col_tipo:
-                cond_tipo_escluso = ~merged[col_tipo].astype(str).str.contains("Prz. Vendita - base", case=False, na=False)
+                tipo_str = merged[col_tipo].astype(str).str.strip().str.lower()
+                # Considera escluso solo se la colonna è valorizzata e indica esplicitamente altro rispetto alla vendita
+                cond_tipo_escluso = tipo_str.str.contains("acquisto", na=False) | tipo_str.str.contains("costo", na=False)
             else:
                 cond_tipo_escluso = pd.Series(False, index=merged.index)
 
-            merged['PASSAGGIO_SICURO'] = cond_zero_presenza | cond_no_variazione_prezzo | cond_tipo_escluso
+            # Assegnazione Passaggio Sicuro
+            merged['PASSAGGIO_SICURO'] = cond_zero_presenza | cond_senza_variazione_prezzo | cond_tipo_escluso
 
             # Calcolo giorni a scadenza / urgenza
-            col_data = next((c for c in merged.columns if "DATA" in c and ("INIZIO" in c or "DECOR" in c or "PASS" in c)), None)
+            col_data = next((c for c in merged.columns if "DATA" in c and any(k in c for k in ["INIZIO", "DECOR", "PASS", "MODIF"])), None)
             today = pd.to_datetime(datetime.today().date())
             
             if col_data:
-                merged['DATA_DT'] = pd.to_datetime(merged[col_data], errors='coerce')
+                merged['DATA_DT'] = pd.to_datetime(merged[col_data], errors='coerce', dayfirst=True)
                 merged['GIORNI_RIMANENTI'] = (merged['DATA_DT'] - today).dt.days
-                merged['URGENTE'] = merged['GIORNI_RIMANENTI'].apply(lambda d: '🔴 URGENTE' if pd.notna(d) and d <= 3 else '🟢 NORMALE')
+                merged['URGENTE'] = merged['GIORNI_RIMANENTI'].apply(
+                    lambda d: '🔴 URGENTE' if pd.notna(d) and d <= 3 else ('🟡 IN SCADENZA' if pd.notna(d) and d <= 7 else '🟢 NORMALE')
+                )
             else:
                 merged['GIORNI_RIMANENTI'] = None
                 merged['URGENTE'] = '🟢 NORMALE'
 
-            # Identificazione colonna Fornitore e Descrizione
-            col_forn = next((c for c in merged.columns if "FORN" in c or "RAGIONE" in c), "FORNITORE")
+            # Identificazione Fornitore e Descrizione senza duplicati
+            col_forn = next((c for c in merged.columns if ("FORN" in c or "RAGIONE" in c) and c != col_art_var), "FORNITORE")
             if col_forn not in merged.columns:
-                merged[col_forn] = "Non specificato"
+                merged[col_forn] = "Fornitore non indicato"
 
-            col_desc = next((c for c in merged.columns if "DESC" in c), None)
+            col_desc = next((c for c in merged.columns if "DESC" in c and "FORN" not in c), None)
 
-            # Filtro degli articoli "Da Gestire" (esclude Passaggio Sicuro)
+            # Filtro articoli Da Gestire
             df_da_gestire = merged[~merged['PASSAGGIO_SICURO']].copy()
 
-            # --- VISUALIZZAZIONE DASHBOARD ---
+            # --- METRICHE IN EVIDENZA ---
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Righe Totali File", len(merged))
             m2.metric("Passaggio Sicuro (Esclusi)", int(merged['PASSAGGIO_SICURO'].sum()))
-            m3.metric("Da Gestire", len(df_da_gestire))
+            m3.metric("Da Gestire a Scaffale", len(df_da_gestire))
             urgenti_count = int((df_da_gestire['URGENTE'] == '🔴 URGENTE').sum())
             m4.metric("Alert Imminenti (<= 3 gg)", urgenti_count, delta="Urgente" if urgenti_count > 0 else None, delta_color="inverse")
 
-            # Grafico e riepilogo per fornitore
+            # --- GRAFICO E RIEPILOGO FORNITORI ---
             st.subheader("📊 Riepilogo Articoli da Gestire per Fornitore")
             if not df_da_gestire.empty:
                 recap_forn = df_da_gestire.groupby(col_forn).agg(
@@ -148,34 +178,44 @@ if var_file and stock_file:
             else:
                 st.info("Nessun articolo rimasto da gestire: tutti i record rientrano nel Passaggio Sicuro.")
 
-            # Tabella di dettaglio
+            # --- TABELLA DETTAGLIATA (COLONNE UNICHE) ---
             st.subheader("📋 Elenco Dettagliato Articoli da Gestire")
-            cols_to_show = ['URGENTE', col_art_var]
+            
+            raw_cols = ['URGENTE', col_art_var]
             if col_desc and col_desc in df_da_gestire.columns:
-                cols_to_show.append(col_desc)
-            cols_to_show.extend([col_forn, 'GIACENZA', 'IN_FACING'])
+                raw_cols.append(col_desc)
+            if col_forn in df_da_gestire.columns and col_forn not in raw_cols:
+                raw_cols.append(col_forn)
+            raw_cols.extend(['GIACENZA', 'IN_FACING'])
             if col_prz_base and col_prz_base in df_da_gestire.columns:
-                cols_to_show.append(col_prz_base)
+                raw_cols.append(col_prz_base)
             if col_prz_nuovo and col_prz_nuovo in df_da_gestire.columns:
-                cols_to_show.append(col_prz_nuovo)
+                raw_cols.append(col_prz_nuovo)
             if col_data and col_data in df_da_gestire.columns:
-                cols_to_show.extend([col_data, 'GIORNI_RIMANENTI'])
+                raw_cols.extend([col_data, 'GIORNI_RIMANENTI'])
 
-            valid_cols = [c for c in cols_to_show if c in df_da_gestire.columns]
+            # Elimina duplicati preservando l'ordine
+            valid_cols = []
+            for col in raw_cols:
+                if col in df_da_gestire.columns and col not in valid_cols:
+                    valid_cols.append(col)
+
             st.dataframe(df_da_gestire[valid_cols], use_container_width=True, hide_index=True)
 
-            # Export Excel
+            # --- ESPORTAZIONE EXCEL ---
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                 df_da_gestire[valid_cols].to_excel(writer, index=False, sheet_name='Da_Gestire')
-                merged[merged['PASSAGGIO_SICURO']].to_excel(writer, index=False, sheet_name='Passaggio_Sicuro')
+                cols_ps = [c for c in valid_cols if c in merged.columns]
+                merged[merged['PASSAGGIO_SICURO']][cols_ps].to_excel(writer, index=False, sheet_name='Passaggio_Sicuro')
             
             st.download_button(
-                label="📥 Scarica Report Excel (Da Gestire & Passaggio Sicuro)",
+                label="📥 Scarica Report Excel Completo",
                 data=buffer.getvalue(),
                 file_name=f"Variazioni_Prezzo_{datetime.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
         except Exception as e:
+            st.error(f"Errore durante l'elaborazione dei file: {e}")
             st.error(f"Errore durante l'elaborazione dei file: {e}")
