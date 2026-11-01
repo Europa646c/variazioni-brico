@@ -1,15 +1,9 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
 from datetime import datetime
 import io
 
 def elabora_variazioni_brico(file_variazioni, file_stock):
-    """
-    Elabora i file delle variazioni listino e dello stock per Brico.
-    Ritorna:
-    - df_recap: DataFrame con il riassunto per la dashboard/email
-    - output_excel: Oggetto BytesIO contenente il file Excel generato per il download
-    """
     # 1. Caricamento Dati
     df_var = pd.read_excel(file_variazioni, sheet_name="Variazioni Listino")
     df_stock = pd.read_excel(file_stock, sheet_name="Stock")
@@ -20,11 +14,9 @@ def elabora_variazioni_brico(file_variazioni, file_stock):
     df_var['ARTICOLO'] = df_var['ARTICOLO'].astype(float).astype(int).astype(str)
 
     df_stock['Cod. Materiale'] = df_stock['Cod. Materiale'].astype(str)
-    # Somma giacenze per stesso articolo (in caso di più magazzini/posizioni)
     stock_agg = df_stock.groupby('Cod. Materiale')['Stock qtà'].sum().reset_index()
 
     df_zkit['Materiale'] = df_zkit['Materiale'].astype(str)
-    # Verifica presenza a scaffale (Modulo non vuoto)
     df_zkit['Has_Facing'] = df_zkit['Modulo'].notna() & (df_zkit['Modulo'] != '')
     facing_agg = df_zkit.groupby('Materiale')['Has_Facing'].any().reset_index()
 
@@ -37,29 +29,24 @@ def elabora_variazioni_brico(file_variazioni, file_stock):
 
     # 4. Logica di Scrematura
     def check_passaggio_sicuro(row):
-        # Esclude i cambi che non sono di vendita base
         if "Prz. Vendita - base" not in str(row['TIPO']):
             return True
-        # Esclude articoli senza giacenza e senza facing
         if row['Stock qtà'] <= 0 and not row['Has_Facing']:
             return True
         return False
 
     df_merged['Passaggio_Sicuro'] = df_merged.apply(check_passaggio_sicuro, axis=1)
 
-    # Calcolo Urgenze
     today = datetime.now()
     df_merged['DATA INIZIO'] = pd.to_datetime(df_merged['DATA INIZIO'], format='%d/%m/%Y', errors='coerce')
     df_merged['Giorni_Rimanenti'] = (df_merged['DATA INIZIO'] - today).dt.days
 
-    # Identificazione articoli "Da Gestire"
     df_merged['Da_Gestire'] = df_merged['P_NUOVO_INS'].isna() & df_merged['C_NUOVO_INS'].isna()
     df_merged['Alert_Imminente'] = df_merged['Da_Gestire'] & (df_merged['Giorni_Rimanenti'] <= 3)
 
-    # 5. Generazione Output (Escludendo i passaggi sicuri)
+    # 5. Generazione Output
     df_output = df_merged[~df_merged['Passaggio_Sicuro']].copy()
 
-    # Creazione Recap per la vista Web / Email
     recap = []
     for forn, group in df_output.groupby('DESC.FORNITORE'):
         da_gestire_count = group['Da_Gestire'].sum()
@@ -78,7 +65,6 @@ def elabora_variazioni_brico(file_variazioni, file_stock):
     if not df_recap.empty:
         df_recap = df_recap.sort_values(by=['Alert Imminenti', 'Da Gestire'], ascending=[False, False])
 
-    # Creazione del file Excel per il download
     df_excel = pd.DataFrame({
         'Fornitore': df_output['DESC.FORNITORE'],
         'Codice Articolo': df_output['ARTICOLO'],
@@ -91,10 +77,44 @@ def elabora_variazioni_brico(file_variazioni, file_stock):
         'Urgente': df_output['Alert_Imminente'].map({True: 'SI', False: 'NO'})
     })
 
-    # Scrittura in memoria (ideale per Streamlit/Flask senza salvare su disco server)
     output_excel = io.BytesIO()
     with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
         df_excel.to_excel(writer, index=False, sheet_name='Da Gestire')
     output_excel.seek(0)
 
     return df_recap, output_excel
+
+# --- INTERFACCIA STREAMLIT ---
+st.set_page_config(page_title="Variazioni Brico", layout="wide")
+st.title("📦 Gestione Variazioni Listino Brico")
+
+st.markdown("Carica i file aggiornati per verificare gli articoli da gestire urgentemente.")
+
+col1, col2 = st.columns(2)
+with col1:
+    file_variazioni = st.file_uploader("1. File Variazioni Future (Excel)", type=['xlsx', 'xls'])
+with col2:
+    file_stock = st.file_uploader("2. File Stock & Facing (Excel)", type=['xlsx', 'xls'])
+
+if file_variazioni and file_stock:
+    if st.button("Elabora Dati", type="primary"):
+        with st.spinner("Elaborazione in corso..."):
+            try:
+                df_recap, file_excel = elabora_variazioni_brico(file_variazioni, file_stock)
+                
+                if not df_recap.empty:
+                    st.success("Analisi completata!")
+                    st.subheader("Riepilogo Fornitori")
+                    st.dataframe(df_recap)
+                    
+                    st.download_button(
+                        label="📥 Scarica File Dettaglio Variazioni (Excel)",
+                        data=file_excel,
+                        file_name="Report_Variazioni_Listino.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.info("Nessun articolo urgente o da gestire rilevato per oggi.")
+                    
+            except Exception as e:
+                st.error(f"Si è verificato un errore durante la lettura dei file: {e}")
