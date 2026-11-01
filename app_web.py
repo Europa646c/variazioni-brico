@@ -1,14 +1,18 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+import io
+
 def elabora_variazioni_brico(file_variazioni, file_stock):
     # 1. Caricamento Dati
     df_var = pd.read_excel(file_variazioni, sheet_name="Variazioni Listino")
     df_stock = pd.read_excel(file_stock, sheet_name="Stock")
     df_zkit = pd.read_excel(file_stock, sheet_name="Zkit")
 
-    # --- NOVITÀ: Pulizia dei nomi delle colonne da spazi vuoti accidentali ---
+    # Pulizia dei nomi delle colonne da spazi vuoti accidentali (es. esportazioni SAP)
     df_var.columns = df_var.columns.str.strip()
     df_stock.columns = df_stock.columns.str.strip()
     df_zkit.columns = df_zkit.columns.str.strip()
-    # -------------------------------------------------------------------------
 
     # 2. Pulizia e Preparazione
     df_var = df_var.dropna(subset=['ARTICOLO']).copy()
@@ -84,3 +88,38 @@ def elabora_variazioni_brico(file_variazioni, file_stock):
     output_excel.seek(0)
 
     return df_recap, output_excel
+
+# --- INTERFACCIA STREAMLIT ---
+st.set_page_config(page_title="Variazioni Brico", layout="wide")
+st.title("📦 Gestione Variazioni Listino Brico")
+
+st.markdown("Carica i file aggiornati per verificare gli articoli da gestire urgentemente.")
+
+col1, col2 = st.columns(2)
+with col1:
+    file_variazioni = st.file_uploader("1. File Variazioni Future (Excel)", type=['xlsx', 'xls'])
+with col2:
+    file_stock = st.file_uploader("2. File Stock & Facing (Excel)", type=['xlsx', 'xls'])
+
+if file_variazioni and file_stock:
+    if st.button("Elabora Dati", type="primary"):
+        with st.spinner("Elaborazione in corso..."):
+            try:
+                df_recap, file_excel = elabora_variazioni_brico(file_variazioni, file_stock)
+                
+                if not df_recap.empty:
+                    st.success("Analisi completata!")
+                    st.subheader("Riepilogo Fornitori")
+                    st.dataframe(df_recap)
+                    
+                    st.download_button(
+                        label="📥 Scarica File Dettaglio Variazioni (Excel)",
+                        data=file_excel,
+                        file_name="Report_Variazioni_Listino.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.info("Nessun articolo urgente o da gestire rilevato per oggi.")
+                    
+            except Exception as e:
+                st.error(f"Si è verificato un errore durante la lettura dei file: {e}")
