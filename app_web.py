@@ -2,17 +2,48 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
+import re
+
+def pulisci_nome_colonna(nome):
+    # Rimuove spazi multipli, tab e spazi non divisibili (xa0)
+    nome_pulito = re.sub(r'\s+', ' ', str(nome))
+    return nome_pulito.strip()
 
 def elabora_variazioni_brico(file_variazioni, file_stock):
-    # 1. Caricamento Dati
+    # Assicura che la lettura parta dall'inizio del file
+    file_variazioni.seek(0)
+    file_stock.seek(0)
+    
     df_var = pd.read_excel(file_variazioni, sheet_name="Variazioni Listino")
-    df_stock = pd.read_excel(file_stock, sheet_name="Stock")
-    df_zkit = pd.read_excel(file_stock, sheet_name="Zkit")
+    
+    # Legge il file una sola volta per gestire correttamente i fogli multipli in Streamlit
+    xls_stock = pd.ExcelFile(file_stock)
+    df_stock = pd.read_excel(xls_stock, sheet_name="Stock")
+    df_zkit = pd.read_excel(xls_stock, sheet_name="Zkit")
 
-    # Pulizia dei nomi delle colonne da spazi vuoti accidentali (es. esportazioni SAP)
-    df_var.columns = df_var.columns.str.strip()
-    df_stock.columns = df_stock.columns.str.strip()
-    df_zkit.columns = df_zkit.columns.str.strip()
+    # Pulizia rigorosa delle intestazioni
+    df_var.columns = [pulisci_nome_colonna(c) for c in df_var.columns]
+    df_stock.columns = [pulisci_nome_colonna(c) for c in df_stock.columns]
+    df_zkit.columns = [pulisci_nome_colonna(c) for c in df_zkit.columns]
+    
+    # Mappatura flessibile (Fuzzy match): rinomina automaticamente se trova varianti simili
+    for col in df_stock.columns:
+        col_lower = col.lower().replace(".", "").replace(" ", "")
+        if "cod" in col_lower and "mat" in col_lower:
+            df_stock.rename(columns={col: "Cod. Materiale"}, inplace=True)
+        if "stockqt" in col_lower:
+            df_stock.rename(columns={col: "Stock qtà"}, inplace=True)
+
+    for col in df_zkit.columns:
+        col_lower = col.lower().replace(".", "").replace(" ", "")
+        if "materiale" in col_lower and "cod" not in col_lower:
+            df_zkit.rename(columns={col: "Materiale"}, inplace=True)
+
+    # Verifica di sicurezza prima di procedere
+    if 'Cod. Materiale' not in df_stock.columns:
+        raise ValueError(f"Colonna 'Cod. Materiale' non trovata. Colonne presenti: {list(df_stock.columns)}")
+    if 'Stock qtà' not in df_stock.columns:
+         raise ValueError(f"Colonna 'Stock qtà' non trovata. Colonne presenti: {list(df_stock.columns)}")
 
     # 2. Pulizia e Preparazione
     df_var = df_var.dropna(subset=['ARTICOLO']).copy()
@@ -122,4 +153,5 @@ if file_variazioni and file_stock:
                     st.info("Nessun articolo urgente o da gestire rilevato per oggi.")
                     
             except Exception as e:
-                st.error(f"Si è verificato un errore durante la lettura dei file: {e}")
+                # Modificato per mostrare a video il dettaglio esatto dell'errore (utile per eventuale debug)
+                st.error(f"Errore durante l'analisi: {e}")
