@@ -1,161 +1,139 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 
-st.set_page_config(page_title="Gestione Variazioni Prezzo - BricoIO", layout="wide")
+st.set_page_config(
+    page_title="Gestione Variazioni Prezzo - Brico",
+    page_icon="🏷️",
+    layout="wide"
+)
 
-st.title("🏷️ Gestione Variazioni Prezzo & Giacenze - BricoIO")
-st.markdown("Carica i due file Excel per elaborare le variazioni prezzo escludendo automaticamente i passaggi sicuri.")
+st.title("🏷️ Dashboard Variazioni Prezzo Negozio")
+st.markdown("Carica i file di esportazione per verificare le variazioni future con giacenza o facing e identificare le urgenze.")
 
 # Sezione caricamento file
 col_upload1, col_upload2 = st.columns(2)
-with col_upload1:
-    file_var = st.file_uploader("1. File Variazioni Future (es. VAR_FUTURE...xlsx)", type=["xlsx", "xls"])
-with col_upload2:
-    file_stock = st.file_uploader("2. File Stock / Facing (es. StockGrottammare.xlsx)", type=["xlsx", "xls"])
 
-if file_var and file_stock:
+with col_upload1:
+    file_variazioni = st.file_uploader(
+        "1. File Variazioni Listino Future (Excel)",
+        type=["xlsx", "xls"]
+    )
+
+with col_upload2:
+    file_stock = st.file_uploader(
+        "2. File Giacenze e Facing (Zkit / Gestionale)",
+        type=["xlsx", "xls"]
+    )
+
+def pulisci_codice(val):
+    if pd.isna(val):
+        return ""
+    val_str = str(val).strip()
+    if val_str.endswith(".0"):
+        val_str = val_str[:-2]
+    return val_str
+
+if file_variazioni and file_stock:
     try:
         with st.spinner("Elaborazione dati in corso..."):
-            df_var = pd.read_excel(file_var)
-            
-            # Lettura fogli stock
-            excel_stock = pd.ExcelFile(file_stock)
-            sheet_names = excel_stock.sheet_names
-            
-            # Giacenze
-            target_stock = "Stock" if "Stock" in sheet_names else sheet_names[0]
-            df_stock = pd.read_excel(excel_stock, sheet_name=target_stock)
-            
-            # Facing (Zkit)
-            df_zkit = None
-            if "Zkit" in sheet_names:
-                df_zkit = pd.read_excel(excel_stock, sheet_name="Zkit")
-            
+            df_var = pd.read_excel(file_variazioni)
+            df_stk = pd.read_excel(file_stock)
+
             # Normalizzazione nomi colonne
-            df_var.columns = [str(c).strip() for c in df_var.columns]
-            df_stock.columns = [str(c).strip() for c in df_stock.columns]
-            if df_zkit is not None:
-                df_zkit.columns = [str(c).strip() for c in df_zkit.columns]
+            df_var.columns = [str(c).strip().upper() for c in df_var.columns]
+            df_stk.columns = [str(c).strip().upper() for c in df_stk.columns]
 
-            # Riconoscimento colonne chiave
-            col_art_var = next((c for c in df_var.columns if "art" in c.lower() or "cod" in c.lower()), df_var.columns[0])
-            col_art_stock = next((c for c in df_stock.columns if "art" in c.lower() or "cod" in c.lower()), df_stock.columns[0])
-            col_qta = next((c for c in df_stock.columns if "qta" in c.lower() or "giac" in c.lower() or "stock" in c.lower()), None)
-            
-            # Conversione codice articolo in stringa pulita
-            df_var[col_art_var] = df_var[col_art_var].astype(str).str.strip()
-            df_stock[col_art_stock] = df_stock[col_art_stock].astype(str).str.strip()
-            
-            # Calcolo giacenza per articolo
-            if col_qta:
-                df_stock[col_qta] = pd.to_numeric(df_stock[col_qta], errors='coerce').fillna(0)
-                stock_map = df_stock.groupby(col_art_stock)[col_qta].sum().to_dict()
+            # Riconoscimento colonna codice articolo
+            col_art_var = next((c for c in df_var.columns if any(k in c for k in ["ARTICOLO", "CODICE", "COD_ART"])), df_var.columns[0])
+            col_art_stk = next((c for c in df_stk.columns if any(k in c for k in ["ARTICOLO", "CODICE", "COD_ART"])), df_stk.columns[0])
+
+            df_var["KEY_ART"] = df_var[col_art_var].apply(pulisci_codice)
+            df_stk["KEY_ART"] = df_stk[col_art_stk].apply(pulisci_codice)
+
+            # Riconoscimento giacenza e facing
+            col_giac = next((c for c in df_stk.columns if any(k in c for k in ["GIAC", "ESISTENZA", "QTA", "QUANT"])), None)
+            col_fac = next((c for c in df_stk.columns if any(k in c for k in ["FACING", "FAC", "FRONT"])), None)
+
+            if col_giac:
+                df_stk[col_giac] = pd.to_numeric(df_stk[col_giac], errors="coerce").fillna(0)
             else:
-                stock_map = {}
+                df_stk["GIACENZA"] = 0
+                col_giac = "GIACENZA"
 
-            # Calcolo presenza a scaffale (Facing / Zkit)
-            facing_set = set()
-            if df_zkit is not None:
-                col_art_zkit = next((c for c in df_zkit.columns if "art" in c.lower() or "cod" in c.lower()), df_zkit.columns[0])
-                col_mod = next((c for c in df_zkit.columns if "mod" in c.lower() or "facing" in c.lower()), None)
-                df_zkit[col_art_zkit] = df_zkit[col_art_zkit].astype(str).str.strip()
-                if col_mod:
-                    valid_zkit = df_zkit[df_zkit[col_mod].notna() & (df_zkit[col_mod].astype(str).str.strip() != "")]
-                    facing_set = set(valid_zkit[col_art_zkit].unique())
-                else:
-                    facing_set = set(df_zkit[col_art_zkit].unique())
-
-            # Assegnazione stock e facing a df_var
-            df_var["Giacenza"] = df_var[col_art_var].map(stock_map).fillna(0)
-            df_var["In_Facing"] = df_var[col_art_var].apply(lambda x: "SI" if x in facing_set else "NO")
-
-            # --- NUOVA SCREMATURA (PASSAGGIO SICURO) ---
-            # 1. Filtro Tipo (se presente, tenere solo Prz. Vendita - base)
-            col_tipo = next((c for c in df_var.columns if "tipo" in c.lower()), None)
-            mask_tipo_ok = True
-            if col_tipo:
-                mask_tipo_ok = df_var[col_tipo].astype(str).str.contains("Prz. Vendita - base", case=False, na=False)
-
-            # 2. Filtro Giacenza / Facing (esclude stock 0 e facing NO)
-            mask_presenza = (df_var["Giacenza"] > 0) | (df_var["In_Facing"] == "SI")
-
-            # 3. Filtro Variazione Prezzo Vendita (Esclude variazioni solo di costo base senza modifica prezzi)
-            col_p_base = next((c for c in df_var.columns if c.upper() == "PREZZO BASE"), None)
-            col_p_nuovo = next((c for c in df_var.columns if c.upper() == "PREZZO NUOVO"), None)
-            
-            if col_p_base and col_p_nuovo:
-                val_p_base = pd.to_numeric(df_var[col_p_base].astype(str).str.replace(',', '.'), errors='coerce')
-                val_p_nuovo = pd.to_numeric(df_var[col_p_nuovo].astype(str).str.replace(',', '.'), errors='coerce')
-                
-                # Ha una variazione di prezzo di vendita valida se:
-                # - Il nuovo prezzo non è vuoto/nullo
-                # - Il nuovo prezzo è diverso dal prezzo base
-                mask_prezzo_modificato = val_p_nuovo.notna() & (val_p_nuovo != val_p_base) & (val_p_nuovo > 0)
+            if col_fac:
+                df_stk[col_fac] = pd.to_numeric(df_stk[col_fac], errors="coerce").fillna(0)
             else:
-                mask_prezzo_modificato = True
+                df_stk["FACING"] = 0
+                col_fac = "FACING"
 
-            # Righe da lavorare (escluse quelle di "Passaggio Sicuro")
-            df_lavoro = df_var[mask_tipo_ok & mask_presenza & mask_prezzo_modificato].copy()
+            # Merge dei due file
+            df_merged = pd.merge(
+                df_var,
+                df_stk[["KEY_ART", col_giac, col_fac]].drop_duplicates(subset=["KEY_ART"]),
+                on="KEY_ART",
+                how="inner"
+            )
 
-            # Calcolo Urgenze (Data Inizio <= 3 giorni)
-            col_data = next((c for c in df_lavoro.columns if "data" in c.lower() and "inizio" in c.lower()), None)
-            if not col_data:
-                col_data = next((c for c in df_lavoro.columns if "data" in c.lower()), None)
+            # Filtro: giacenza > 0 oppure facing > 0
+            df_filtrato = df_merged[
+                (df_merged[col_giac] > 0) | (df_merged[col_fac] > 0)
+            ].copy()
+
+            # Riconoscimento data decorrenza / validità
+            col_data = next((c for c in df_filtrato.columns if any(k in c for k in ["DATA", "DECORRENZA", "VALIDITA", "SCADENZA"])), None)
+            
+            oggi = datetime.now()
+            soglia_urgenza = oggi + timedelta(days=3)
 
             if col_data:
-                df_lavoro[col_data] = pd.to_datetime(df_lavoro[col_data], errors='coerce')
-                oggi = pd.to_datetime(datetime.now().date())
-                df_lavoro["Giorni_Rimanenti"] = (df_lavoro[col_data] - oggi).dt.days
-                df_lavoro["Urgente"] = df_lavoro["Giorni_Rimanenti"].apply(
-                    lambda g: "🚨 URGENTE (<=3gg)" if pd.notna(g) and g <= 3 else "Regolare"
+                df_filtrato["DATA_CONV"] = pd.to_datetime(df_filtrato[col_data], errors="coerce")
+                df_filtrato["URGENTE"] = df_filtrato["DATA_CONV"].apply(
+                    lambda d: "🚨 URGENTE" if pd.notna(d) and d <= soglia_urgenza else "Normale"
                 )
             else:
-                df_lavoro["Giorni_Rimanenti"] = None
-                df_lavoro["Urgente"] = "Regolare"
+                df_filtrato["URGENTE"] = "Normale"
 
-            # Individuazione colonna Fornitore
-            col_forn = next((c for c in df_lavoro.columns if "forn" in c.lower() or "ragione" in c.lower()), None)
+            # Riconoscimento colonna fornitore
+            col_forn = next((c for c in df_filtrato.columns if any(k in c for k in ["FORNITORE", "FORN", "RAGIONE_SOC", "DESC_FORN"])), None)
 
-        # Dashboard Metriche
-        st.success("File elaborati con successo!")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Totale Righe File", len(df_var))
-        m2.metric("Passaggi Sicuri Esclusi", len(df_var) - len(df_lavoro))
-        m3.metric("Da Gestire (Scaffale/Giacenza)", len(df_lavoro))
-        urgenze_tot = (df_lavoro["Urgente"] == "🚨 URGENTE (<=3gg)").sum()
-        m4.metric("🚨 Alert Imminenti (<= 3gg)", urgenze_tot)
+        st.success("Elaborazione completata con successo!")
 
-        # Tabella di Riepilogo per Fornitore
+        # Metric cards
+        col_m1, col_m2, col_m3 = st.columns(3)
+        tot_var = len(df_var)
+        tot_presenti = len(df_filtrato)
+        tot_urgenti = (df_filtrato["URGENTE"] == "🚨 URGENTE").sum()
+
+        col_m1.metric("Totale Variazioni Listino", tot_var)
+        col_m2.metric("In Negozio (Giacenza > 0 o Facing)", tot_presenti)
+        col_m3.metric("Scadenze Urgenti (≤ 3 gg)", tot_urgenti)
+
+        # Grafico e riepilogo fornitori se presente la colonna
         if col_forn:
-            st.subheader("📊 Riepilogo per Fornitore")
-            recap_forn = df_lavoro.groupby(col_forn).agg(
-                Totale_Articoli=(col_art_var, 'count'),
-                Articoli_Urgenti=('Urgente', lambda x: (x == "🚨 URGENTE (<=3gg)").sum()),
-                Giacenza_Totale=('Giacenza', 'sum')
-            ).reset_index().sort_values(by=["Articoli_Urgenti", "Totale_Articoli"], ascending=False)
-            
-            st.dataframe(recap_forn, use_container_width=True)
+            st.subheader("📊 Riepilogo Variazioni per Fornitore")
+            recap_forn = df_filtrato[col_forn].value_counts().reset_index()
+            recap_forn.columns = ["Fornitore", "Numero Variazioni"]
+            st.bar_chart(recap_forn.set_index("Fornitore"))
 
-        # Dettaglio Articoli
-        st.subheader("📋 Dettaglio Articoli da Gestire")
-        st.dataframe(df_lavoro, use_container_width=True)
+        # Visualizzazione Tabella
+        st.subheader("📋 Dettaglio Articoli da Verificare")
+        colonne_da_mostrare = [c for c in df_filtrato.columns if c not in ["KEY_ART", "DATA_CONV"]]
+        st.dataframe(df_filtrato[colonne_da_mostrare], use_container_width=True)
 
         # Esportazione Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_lavoro.to_excel(writer, sheet_name="Da_Gestire", index=False)
-            if col_forn:
-                recap_forn.to_excel(writer, sheet_name="Riepilogo_Fornitori", index=False)
-        output.seek(0)
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df_filtrato[colonne_da_mostrare].to_excel(writer, index=False, sheet_name="Variazioni_Negozio")
+        buffer.seek(0)
 
         st.download_button(
-            label="📥 Scarica Report Excel Filtrato",
-            data=output,
-            file_name=f"Variazioni_Prezzo_Gestione_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            label="📥 Scarica File Excel Elaborato",
+            data=buffer,
+            file_name=f"Variazioni_Negozio_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except Exception as e:
-        st.error(f"Errore durante l'elaborazione dei file: {e}")
+        st.error(f"Si è verificato un errore durante l'elaborazione dei file: {e}")
