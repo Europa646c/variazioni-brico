@@ -52,22 +52,22 @@ if file_var and file_stock:
         col_c_nuovo = trova_colonna(df_var.columns, ["COSTO NUOVO", "CST NUOVO", "C_NUOVO"])
         col_p_ins = trova_colonna(df_var.columns, ["P_NUOVO_INS", "PREZZO_INS", "P_INS"])
 
-        # Controllo colonna articolo obbligatoria
         if not col_art_var:
             st.error(f"Impossibile trovare la colonna articolo nel file Variazioni. Colonne presenti: {list(df_var.columns)}")
             st.stop()
 
-        col_art_stock = trova_colonna(df_stock_raw.columns, ["ARTICOLO", "CODICE", "COD_ART", "ART."])
-        col_qta_stock = trova_colonna(df_stock_raw.columns, ["GIACENZA", "QTA", "DISPONIBILE", "ESISTENZA", "QUANTITÀ", "QUANTITA"])
+        # Riconoscimento colonne Stock (inclusa 'Stock qtà')
+        col_art_stock = trova_colonna(df_stock_raw.columns, ["ARTICOLO", "CODICE", "COD_ART", "MATERIALE", "ART."])
+        col_qta_stock = trova_colonna(df_stock_raw.columns, ["STOCK QTÀ", "STOCK QTA", "STOCK_QTA", "GIACENZA", "QTA", "DISPONIBILE", "ESISTENZA"])
 
         if not col_art_stock or not col_qta_stock:
             st.error(f"Verifica il foglio Stock. Colonne presenti: {list(df_stock_raw.columns)}")
             st.stop()
 
-        col_art_zkit = trova_colonna(df_zkit_raw.columns, ["ARTICOLO", "CODICE", "COD_ART", "ART."]) if not df_zkit_raw.empty else None
+        col_art_zkit = trova_colonna(df_zkit_raw.columns, ["ARTICOLO", "CODICE", "COD_ART", "MATERIALE", "ART."]) if not df_zkit_raw.empty else None
         col_mod_zkit = trova_colonna(df_zkit_raw.columns, ["MODULO", "FACING"]) if not df_zkit_raw.empty else None
 
-        # Chiave univoca articolo
+        # Normalizzazione codici
         df_var['KEY_ART'] = df_var[col_art_var].astype(str).str.strip().str.lstrip("0")
         df_stock_raw['KEY_ART'] = df_stock_raw[col_art_stock].astype(str).str.strip().str.lstrip("0")
 
@@ -84,7 +84,7 @@ if file_var and file_stock:
         else:
             df_var['In_Facing'] = False
 
-        # Conversione valori prezzo
+        # Conversione valori prezzi
         if col_p_base:
             df_var['P_BASE_NUM'] = pd.to_numeric(df_var[col_p_base].astype(str).str.replace(',', '.'), errors='coerce')
         else:
@@ -103,7 +103,7 @@ if file_var and file_stock:
         else:
             cond_non_base = False
 
-        # Solo variazione costo (prezzo vendita vuoto o invariato)
+        # Solo variazione costo (nessun cambio su prezzo vendita)
         cond_prezzo_invariato = (
             (df_var['P_BASE_NUM'].isna() & df_var['P_NUOVO_NUM'].isna()) |
             (df_var['P_BASE_NUM'].notna() & df_var['P_NUOVO_NUM'].notna() & (df_var['P_BASE_NUM'] == df_var['P_NUOVO_NUM']))
@@ -111,7 +111,7 @@ if file_var and file_stock:
 
         df_var['Passaggio_Sicuro'] = cond_zero_stock_facing | cond_non_base | cond_prezzo_invariato
 
-        # Giorni rimanenti e urgenze
+        # Calcolo giorni rimanenti e urgenze
         today = pd.to_datetime(datetime.now().date())
         if col_data_ini:
             df_var['Data_Inizio_DT'] = pd.to_datetime(df_var[col_data_ini], errors='coerce')
