@@ -27,7 +27,13 @@ if file_var and file_exp:
             # Pulizia Variazioni
             df_var_clean = df_var.dropna(subset=['ARTICOLO']).copy()
             df_var_clean['ARTICOLO'] = pd.to_numeric(df_var_clean['ARTICOLO'], errors='coerce')
+            
+            # Filtro 1: Rimuove i prezzi vuoti
             df_var_clean = df_var_clean.dropna(subset=['PREZZO BASE', 'PREZZO NUOVO'])
+            
+            # Filtro 2: Esclude gli articoli in promozione IS-R dalla colonna TIPO
+            if 'TIPO' in df_var_clean.columns:
+                df_var_clean = df_var_clean[df_var_clean['TIPO'] != 'Prz. vend. prom. IS-R']
 
             # Pulizia Giacenze
             df_exp['Materiale'] = pd.to_numeric(df_exp['Materiale'], errors='coerce')
@@ -44,8 +50,8 @@ if file_var and file_exp:
             df_result = df_result.rename(columns={'Utilizz. liber.': 'GIACENZA'})
             df_result = df_result.drop(columns=['Materiale'])
 
-            st.success(f"Elaborazione completata! Trovati {len(df_result)} articoli in giacenza.")
-            st.dataframe(df_result.head(10)) # Mostra un'anteprima a schermo
+            st.success(f"Elaborazione completata! Trovati {len(df_result)} articoli in giacenza da aggiornare.")
+            st.dataframe(df_result.head(10))
 
             # Creazione file Excel formattato in memoria
             output = BytesIO()
